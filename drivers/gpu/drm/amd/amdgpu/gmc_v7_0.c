@@ -27,6 +27,7 @@
 #include "cik.h"
 #include "gmc_v7_0.h"
 #include "amdgpu_ucode.h"
+#include "amdgpu_amdkfd.h"
 
 #include "bif/bif_4_1_d.h"
 #include "bif/bif_4_1_sh_mask.h"
@@ -36,9 +37,6 @@
 
 #include "oss/oss_2_0_d.h"
 #include "oss/oss_2_0_sh_mask.h"
-
-#include "dce/dce_8_0_d.h"
-#include "dce/dce_8_0_sh_mask.h"
 
 #include "amdgpu_atombios.h"
 
@@ -723,6 +721,8 @@ static void gmc_v7_0_gart_fini(struct amdgpu_device *adev)
  * @adev: amdgpu_device pointer
  * @status: VM_CONTEXT1_PROTECTION_FAULT_STATUS register value
  * @addr: VM_CONTEXT1_PROTECTION_FAULT_ADDR register value
+ * @mc_client: VM_CONTEXT1_PROTECTION_FAULT_MCCLIENT register value
+ * @src_id: interrupt source id
  *
  * Print human readable fault information (CIK).
  */
@@ -730,6 +730,7 @@ static void gmc_v7_0_vm_decode_fault(struct amdgpu_device *adev,
 				     u32 status, u32 addr, u32 mc_client)
 {
 	u32 mc_id;
+	struct kfd_vm_fault_info *info = adev->mc.vm_fault_info;
 	u32 vmid = REG_GET_FIELD(status, VM_CONTEXT1_PROTECTION_FAULT_STATUS, VMID);
 	u32 protections = REG_GET_FIELD(status, VM_CONTEXT1_PROTECTION_FAULT_STATUS,
 					PROTECTIONS);
@@ -744,6 +745,19 @@ static void gmc_v7_0_vm_decode_fault(struct amdgpu_device *adev,
 	       REG_GET_FIELD(status, VM_CONTEXT1_PROTECTION_FAULT_STATUS,
 			     MEMORY_CLIENT_RW) ?
 	       "write" : "read", block, mc_client, mc_id);
+
+	if (amdgpu_amdkfd_is_kfd_vmid(adev, vmid)
+		&& !atomic_read(&adev->mc.vm_fault_info_updated)) {
+		info->vmid = vmid;
+		info->mc_id = mc_id;
+		info->page_addr = addr;
+		info->prot_valid = protections & 0x7 ? true : false;
+		info->prot_read = protections & 0x8 ? true : false;
+		info->prot_write = protections & 0x10 ? true : false;
+		info->prot_exec = protections & 0x20 ? true : false;
+		mb();
+		atomic_set(&adev->mc.vm_fault_info_updated, 1);
+	}
 }
 
 
@@ -1017,6 +1031,12 @@ static int gmc_v7_0_sw_init(void *handle)
 		adev->vm_manager.vram_base_offset = 0;
 	}
 
+	adev->mc.vm_fault_info = kmalloc(sizeof(struct kfd_vm_fault_info),
+					GFP_KERNEL);
+	if (!adev->mc.vm_fault_info)
+		return -ENOMEM;
+	atomic_set(&adev->mc.vm_fault_info_updated, 0);
+
 	return 0;
 }
 
@@ -1025,6 +1045,7 @@ static int gmc_v7_0_sw_fini(void *handle)
 	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
 
 	amdgpu_vm_manager_fini(adev);
+	kfree(adev->mc.vm_fault_info);
 	gmc_v7_0_gart_fini(adev);
 	amdgpu_gem_force_release(adev);
 	amdgpu_bo_fini(adev);

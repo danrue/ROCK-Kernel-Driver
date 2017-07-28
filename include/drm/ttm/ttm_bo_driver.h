@@ -38,11 +38,6 @@
 #include <linux/spinlock.h>
 #include <linux/reservation.h>
 
-#include "ttm_bo_api.h"
-#include "ttm_memory.h"
-#include "ttm_module.h"
-#include "ttm_placement.h"
-
 #define TTM_MAX_BO_PRIORITY	4U
 
 struct ttm_backend_func {

@@ -27,6 +27,8 @@
 #define SDMA1_REGISTER_OFFSET                             0x200 /* not a register */
 #define SDMA_MAX_INSTANCE 2
 
+#define KFD_VI_SDMA_QUEUE_OFFSET                      0x80 /* not a register */
+
 /* crtc instance offsets */
 #define CRTC0_REGISTER_OFFSET                 (0x1b9c - 0x1b9c)
 #define CRTC1_REGISTER_OFFSET                 (0x1d9c - 0x1b9c)
@@ -367,6 +369,9 @@
 			 * x=0: tmz_begin
 			 * x=1: tmz_end
 			 */
+#define	PACKET3_INVALIDATE_TLBS				0x98
+#              define PACKET3_INVALIDATE_TLBS_DST_SEL(x)     ((x) << 0)
+#              define PACKET3_INVALIDATE_TLBS_PASID(x)       ((x) << 5)
 #define	PACKET3_SET_RESOURCES				0xA0
 /* 1. header
  * 2. CONTROL

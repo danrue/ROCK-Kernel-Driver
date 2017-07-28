@@ -292,9 +292,8 @@ static int amdgpu_vm_alloc_levels(struct amdgpu_device *adev,
 	if (!parent->entries) {
 		unsigned num_entries = amdgpu_vm_num_entries(adev, level);
 
-		parent->entries = kvmalloc_array(num_entries,
-						   sizeof(struct amdgpu_vm_pt),
-						   GFP_KERNEL | __GFP_ZERO);
+		parent->entries = drm_calloc_large(num_entries,
+						   sizeof(struct amdgpu_vm_pt));
 		if (!parent->entries)
 			return -ENOMEM;
 		memset(parent->entries, 0 , sizeof(struct amdgpu_vm_pt));
@@ -352,7 +351,6 @@ static int amdgpu_vm_alloc_levels(struct amdgpu_device *adev,
 
 			entry->bo = pt;
 			entry->addr = 0;
-			entry->huge_page = false;
 		}
 
 		if (level < adev->vm_manager.num_level) {
@@ -1118,8 +1116,7 @@ static int amdgpu_vm_update_level(struct amdgpu_device *adev,
 
 		pt = amdgpu_bo_gpu_offset(bo);
 		pt = amdgpu_gart_get_vm_pde(adev, pt);
-		if (parent->entries[pt_idx].addr == pt ||
-		    parent->entries[pt_idx].huge_page)
+		if (parent->entries[pt_idx].addr == pt)
 			continue;
 
 		parent->entries[pt_idx].addr = pt;
@@ -1260,95 +1257,29 @@ int amdgpu_vm_update_directories(struct amdgpu_device *adev,
 }
 
 /**
- * amdgpu_vm_find_entry - find the entry for an address
+ * amdgpu_vm_find_pt - find the page table for an address
  *
  * @p: see amdgpu_pte_update_params definition
  * @addr: virtual address in question
- * @entry: resulting entry or NULL
- * @parent: parent entry
  *
- * Find the vm_pt entry and it's parent for the given address.
+ * Find the page table BO for a virtual address, return NULL when none found.
  */
-void amdgpu_vm_get_entry(struct amdgpu_pte_update_params *p, uint64_t addr,
-			 struct amdgpu_vm_pt **entry,
-			 struct amdgpu_vm_pt **parent)
+static struct amdgpu_bo *amdgpu_vm_get_pt(struct amdgpu_pte_update_params *p,
+					  uint64_t addr)
 {
+	struct amdgpu_vm_pt *entry = &p->vm->root;
 	unsigned idx, level = p->adev->vm_manager.num_level;
 
-	*parent = NULL;
-	*entry = &p->vm->root;
-	while ((*entry)->entries) {
+	while (entry->entries) {
 		idx = addr >> (p->adev->vm_manager.block_size * level--);
-		idx %= amdgpu_bo_size((*entry)->bo) / 8;
-		*parent = *entry;
-		*entry = &(*entry)->entries[idx];
+		idx %= amdgpu_bo_size(entry->bo) / 8;
+		entry = &entry->entries[idx];
 	}
 
 	if (level)
-		*entry = NULL;
-}
+		return NULL;
 
-/**
- * amdgpu_vm_handle_huge_pages - handle updating the PD with huge pages
- *
- * @p: see amdgpu_pte_update_params definition
- * @entry: vm_pt entry to check
- * @parent: parent entry
- * @nptes: number of PTEs updated with this operation
- * @dst: destination address where the PTEs should point to
- * @flags: access flags fro the PTEs
- *
- * Check if we can update the PD with a huge page.
- */
-static int amdgpu_vm_handle_huge_pages(struct amdgpu_pte_update_params *p,
-				       struct amdgpu_vm_pt *entry,
-				       struct amdgpu_vm_pt *parent,
-				       unsigned nptes, uint64_t dst,
-				       uint64_t flags)
-{
-	bool use_cpu_update = (p->func == amdgpu_vm_cpu_set_ptes);
-	uint64_t pd_addr, pde;
-	int r;
-
-	/* In the case of a mixed PT the PDE must point to it*/
-	if (p->adev->asic_type < CHIP_VEGA10 ||
-	    nptes != AMDGPU_VM_PTE_COUNT(p->adev) ||
-	    p->func == amdgpu_vm_do_copy_ptes ||
-	    !(flags & AMDGPU_PTE_VALID)) {
-
-		dst = amdgpu_bo_gpu_offset(entry->bo);
-		dst = amdgpu_gart_get_vm_pde(p->adev, dst);
-		flags = AMDGPU_PTE_VALID;
-	} else {
-		flags |= AMDGPU_PDE_PTE;
-	}
-
-	if (entry->addr == dst &&
-	    entry->huge_page == !!(flags & AMDGPU_PDE_PTE))
-		return 0;
-
-	entry->addr = dst;
-	entry->huge_page = !!(flags & AMDGPU_PDE_PTE);
-
-	if (use_cpu_update) {
-		r = amdgpu_bo_kmap(parent->bo, (void *)&pd_addr);
-		if (r)
-			return r;
-
-		pde = pd_addr + (entry - parent->entries) * 8;
-		amdgpu_vm_cpu_set_ptes(p, pde, dst, 1, 0, flags);
-	} else {
-		if (parent->bo->shadow) {
-			pd_addr = amdgpu_bo_gpu_offset(parent->bo->shadow);
-			pde = pd_addr + (entry - parent->entries) * 8;
-			amdgpu_vm_do_set_ptes(p, pde, dst, 1, 0, flags);
-		}
-		pd_addr = amdgpu_bo_gpu_offset(parent->bo);
-		pde = pd_addr + (entry - parent->entries) * 8;
-		amdgpu_vm_do_set_ptes(p, pde, dst, 1, 0, flags);
-	}
-
-	return 0;
+	return entry->bo;
 }
 
 /**
@@ -1375,31 +1306,22 @@ static int amdgpu_vm_update_ptes(struct amdgpu_pte_update_params *params,
 	struct amdgpu_bo *pt;
 	unsigned nptes;
 	bool use_cpu_update = (params->func == amdgpu_vm_cpu_set_ptes);
-	int r;
+
 
 	/* walk over the address space and update the page tables */
-	for (addr = start; addr < end; addr += nptes,
-	     dst += nptes * AMDGPU_GPU_PAGE_SIZE) {
-		struct amdgpu_vm_pt *entry, *parent;
-
-		amdgpu_vm_get_entry(params, addr, &entry, &parent);
-		if (!entry)
-			return -ENOENT;
+	for (addr = start; addr < end; addr += nptes) {
+		pt = amdgpu_vm_get_pt(params, addr);
+		if (!pt) {
+			pr_err("PT not found, aborting update_ptes\n");
+			return -EINVAL;
+		}
 
 		if ((addr & ~mask) == (end & ~mask))
 			nptes = end - addr;
 		else
 			nptes = AMDGPU_VM_PTE_COUNT(adev) - (addr & mask);
 
-		r = amdgpu_vm_handle_huge_pages(params, entry, parent,
-						nptes, dst, flags);
-		if (r)
-			return r;
 
-		if (entry->huge_page)
-			continue;
-
-		pt = entry->bo;
 		if (use_cpu_update) {
 			pe_start = (unsigned long)pt->kptr;
 		} else {
@@ -1415,6 +1337,8 @@ static int amdgpu_vm_update_ptes(struct amdgpu_pte_update_params *params,
 		pe_start += (addr & mask) * 8;
 		params->func(params, pe_start, dst, nptes,
 			     AMDGPU_GPU_PAGE_SIZE, flags);
+
+		dst += nptes * AMDGPU_GPU_PAGE_SIZE;
 	}
 
 	return 0;
@@ -1530,6 +1454,30 @@ static int amdgpu_vm_bo_update_mapping(struct amdgpu_device *adev,
 	params.adev = adev;
 	params.vm = vm;
 	params.src = src;
+
+	/* sync to everything on unmapping */
+	if (!(flags & AMDGPU_PTE_VALID))
+		owner = AMDGPU_FENCE_OWNER_UNDEFINED;
+
+	if (vm->use_cpu_for_update) {
+		/* params.src is used as flag to indicate system Memory */
+		if (pages_addr)
+			params.src = ~0;
+
+		/* Wait for PT BOs to be free. PTs share the same resv. object
+		 * as the root PD BO
+		 */
+		r = amdgpu_vm_wait_pd(adev, vm, owner);
+		if (unlikely(r))
+			return r;
+
+		params.func = amdgpu_vm_cpu_set_ptes;
+		params.pages_addr = pages_addr;
+		return amdgpu_vm_frag_ptes(&params, start, last + 1,
+					   addr, flags);
+	}
+
+	ring = container_of(vm->entity.sched, struct amdgpu_ring, sched);
 
 	/* sync to everything on unmapping */
 	if (!(flags & AMDGPU_PTE_VALID))
@@ -1675,6 +1623,7 @@ static int amdgpu_vm_bo_split_mapping(struct amdgpu_device *adev,
 				      dma_addr_t *pages_addr,
 				      struct amdgpu_vm *vm,
 				      struct amdgpu_bo_va_mapping *mapping,
+				      uint64_t vram_base_offset,
 				      uint64_t flags,
 				      struct drm_mm_node *nodes,
 				      struct dma_fence **fence)
@@ -1733,7 +1682,7 @@ static int amdgpu_vm_bo_split_mapping(struct amdgpu_device *adev,
 				max_entries = min(max_entries, 16ull * 1024ull);
 			addr = 0;
 		} else if (flags & AMDGPU_PTE_VALID) {
-			addr += adev->vm_manager.vram_base_offset;
+			addr += vram_base_offset;
 		}
 		addr += pfn << PAGE_SHIFT;
 
@@ -1778,6 +1727,8 @@ int amdgpu_vm_bo_update(struct amdgpu_device *adev,
 	struct ttm_mem_reg *mem;
 	struct drm_mm_node *nodes;
 	struct dma_fence *exclusive;
+	uint64_t vram_base_offset = adev->vm_manager.vram_base_offset;
+	struct amdgpu_device *bo_adev;
 	int r;
 
 	if (clear || !bo_va->bo) {
@@ -1799,9 +1750,15 @@ int amdgpu_vm_bo_update(struct amdgpu_device *adev,
 
 	if (bo_va->bo) {
 		flags = amdgpu_ttm_tt_pte_flags(adev, bo_va->bo->tbo.ttm, mem);
+		bo_adev = amdgpu_ttm_adev(bo_va->bo->tbo.bdev);
 		gtt_flags = (amdgpu_ttm_is_bound(bo_va->bo->tbo.ttm) &&
-			adev == amdgpu_ttm_adev(bo_va->bo->tbo.bdev)) ?
+			adev == bo_adev) ?
 			flags : 0;
+		if (mem && mem->mem_type == TTM_PL_VRAM &&
+			adev != bo_adev) {
+			flags |= AMDGPU_PTE_SYSTEM;
+			vram_base_offset = bo_adev->mc.aper_base;
+		}
 	} else {
 		flags = 0x0;
 		gtt_flags = ~0x0;
@@ -1815,8 +1772,8 @@ int amdgpu_vm_bo_update(struct amdgpu_device *adev,
 	list_for_each_entry(mapping, &bo_va->invalids, list) {
 		r = amdgpu_vm_bo_split_mapping(adev, exclusive,
 					       gtt_flags, pages_addr, vm,
-					       mapping, flags, nodes,
-					       &bo_va->last_pt_update);
+					       mapping, vram_base_offset, flags,
+					       nodes, &bo_va->last_pt_update);
 		if (r)
 			return r;
 	}
@@ -2495,6 +2452,10 @@ int amdgpu_vm_init(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 	int r, i;
 	u64 flags;
 
+	/* Temporary use only the first VM manager */
+	unsigned vmhub = 0; /*ring->funcs->vmhub;*/
+	struct amdgpu_vm_id_manager *id_mgr = &adev->vm_manager.id_mgr[vmhub];
+
 	vm->va = RB_ROOT;
 	vm->client_id = atomic64_inc_return(&adev->vm_manager.client_counter);
 	for (i = 0; i < AMDGPU_MAX_VMHUBS; i++)
@@ -2556,6 +2517,23 @@ int amdgpu_vm_init(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 
 	amdgpu_bo_unreserve(vm->root.bo);
 
+	vm->vm_context = vm_context;
+	if (vm_context == AMDGPU_VM_CONTEXT_COMPUTE) {
+		mutex_lock(&id_mgr->lock);
+
+		if ((adev->vm_manager.n_compute_vms++ == 0) &&
+			(!amdgpu_sriov_vf(adev))) {
+			/* First Compute VM: enable compute power profile */
+			if (adev->pp_enabled)
+				amdgpu_dpm_switch_power_profile(adev,
+						AMD_PP_COMPUTE_PROFILE);
+			else if (adev->pm.funcs->switch_power_profile)
+				adev->pm.funcs->switch_power_profile(adev,
+						AMD_PP_COMPUTE_PROFILE);
+		}
+		mutex_unlock(&id_mgr->lock);
+	}
+
 	return 0;
 
 error_free_root:
@@ -2589,7 +2567,7 @@ static void amdgpu_vm_free_levels(struct amdgpu_vm_pt *level)
 		for (i = 0; i <= level->last_entry_used; i++)
 			amdgpu_vm_free_levels(&level->entries[i]);
 
-	kvfree(level->entries);
+	drm_free_large(level->entries);
 }
 
 /**
@@ -2606,6 +2584,26 @@ void amdgpu_vm_fini(struct amdgpu_device *adev, struct amdgpu_vm *vm)
 	struct amdgpu_bo_va_mapping *mapping, *tmp;
 	bool prt_fini_needed = !!adev->gart.gart_funcs->set_prt;
 	int i;
+
+	if (vm->vm_context == AMDGPU_VM_CONTEXT_COMPUTE) {
+		struct amdgpu_vm_id_manager *id_mgr =
+			&adev->vm_manager.id_mgr[AMDGPU_GFXHUB];
+		mutex_lock(&id_mgr->lock);
+
+		WARN(adev->vm_manager.n_compute_vms == 0, "Unbalanced number of Compute VMs");
+
+		if ((--adev->vm_manager.n_compute_vms == 0) &&
+			(!amdgpu_sriov_vf(adev))) {
+			/* Last KFD VM: enable graphics power profile */
+			if (adev->pp_enabled)
+				amdgpu_dpm_switch_power_profile(adev,
+						AMD_PP_GFX_PROFILE);
+			else if (adev->pm.funcs->switch_power_profile)
+				adev->pm.funcs->switch_power_profile(adev,
+						AMD_PP_GFX_PROFILE);
+		}
+		mutex_unlock(&id_mgr->lock);
+	}
 
 	amd_sched_entity_fini(vm->entity.sched, &vm->entity);
 
@@ -2686,6 +2684,7 @@ void amdgpu_vm_manager_init(struct amdgpu_device *adev)
 	adev->vm_manager.vm_update_mode = 0;
 #endif
 
+	adev->vm_manager.n_compute_vms = 0;
 }
 
 /**

@@ -51,7 +51,7 @@ static void amdgpu_bo_list_release_rcu(struct kref *ref)
 		amdgpu_bo_unref(&list->array[i].robj);
 
 	mutex_destroy(&list->lock);
-	kvfree(list->array);
+	drm_free_large(list->array);
 	kfree_rcu(list, rhead);
 }
 
@@ -198,16 +198,12 @@ amdgpu_bo_list_get(struct amdgpu_fpriv *fpriv, int id)
 	result = idr_find(&fpriv->bo_list_handles, id);
 
 	if (result) {
-		if (kref_get_unless_zero(&result->refcount)) {
-			rcu_read_unlock();
+		if (kref_get_unless_zero(&result->refcount))
 			mutex_lock(&result->lock);
-		} else {
-			rcu_read_unlock();
+		else
 			result = NULL;
-		}
-	} else {
-		rcu_read_unlock();
 	}
+	rcu_read_unlock();
 
 	return result;
 }

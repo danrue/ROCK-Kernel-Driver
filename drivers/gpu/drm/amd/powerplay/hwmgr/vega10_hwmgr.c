@@ -20,11 +20,10 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  *
  */
-
-#include <linux/delay.h>
-#include <linux/fb.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/fb.h>
+#include "linux/delay.h"
 
 #include "hwmgr.h"
 #include "amd_powerplay.h"
@@ -2909,6 +2908,9 @@ static int vega10_enable_dpm_tasks(struct pp_hwmgr *hwmgr)
 	PP_ASSERT_WITH_CODE(!tmp_result,
 			"Failed to configure telemetry!",
 			return tmp_result);
+
+	smum_send_msg_to_smc_with_parameter(hwmgr->smumgr,
+			PPSMC_MSG_NumOfDisplays, 0);
 
 	smum_send_msg_to_smc_with_parameter(hwmgr->smumgr,
 			PPSMC_MSG_NumOfDisplays, 0);

@@ -21,7 +21,7 @@
  *
  */
 #include <linux/firmware.h>
-#include <drm/drmP.h>
+#include "drmP.h"
 #include "amdgpu.h"
 #include "amdgpu_gfx.h"
 #include "soc15.h"
@@ -211,7 +211,7 @@ static void gfx_v9_0_init_golden_registers(struct amdgpu_device *adev)
 
 static void gfx_v9_0_scratch_init(struct amdgpu_device *adev)
 {
-	adev->gfx.scratch.num_reg = 8;
+	adev->gfx.scratch.num_reg = 7;
 	adev->gfx.scratch.reg_base = SOC15_REG_OFFSET(GC, 0, mmSCRATCH_REG0);
 	adev->gfx.scratch.free_mask = (1u << adev->gfx.scratch.num_reg) - 1;
 }
@@ -4440,6 +4440,19 @@ static int gfx_v9_0_get_cu_info(struct amdgpu_device *adev,
 
 	cu_info->number = active_cu_number;
 	cu_info->ao_cu_mask = ao_cu_mask;
+	cu_info->simd_per_cu = NUM_SIMD_PER_CU;
+
+	switch (adev->asic_type) {
+	case CHIP_VEGA10: /* TODO: check if any of this changed */
+		cu_info->max_waves_per_simd = 10;
+		cu_info->max_scratch_slots_per_cu = 32;
+		cu_info->wave_front_size = 64;
+		cu_info->lds_size = 64;
+		break;
+	default:
+		dev_warn(adev->dev, "CU info asic_type [0x%x] not supported\n",
+					adev->asic_type);
+	}
 
 	return 0;
 }

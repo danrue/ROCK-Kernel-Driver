@@ -70,9 +70,6 @@ struct amdgpu_bo_list_entry;
 /* TILED for VEGA10, reserved for older ASICs  */
 #define AMDGPU_PTE_PRT		(1ULL << 51)
 
-/* PDE is handled as PTE for VEGA10 */
-#define AMDGPU_PDE_PTE		(1ULL << 54)
-
 /* VEGA10 only */
 #define AMDGPU_PTE_MTYPE(a)    ((uint64_t)a << 57)
 #define AMDGPU_PTE_MTYPE_MASK	AMDGPU_PTE_MTYPE(3ULL)
@@ -92,18 +89,17 @@ struct amdgpu_bo_list_entry;
 /* max vmids dedicated for process */
 #define AMDGPU_VM_MAX_RESERVED_VMID	1
 
-#define AMDGPU_VM_CONTEXT_GFX 0
-#define AMDGPU_VM_CONTEXT_COMPUTE 1
-
 /* See vm_update_mode */
 #define AMDGPU_VM_USE_CPU_FOR_GFX (1 << 0)
 #define AMDGPU_VM_USE_CPU_FOR_COMPUTE (1 << 1)
+
+#define AMDGPU_VM_CONTEXT_GFX 0
+#define AMDGPU_VM_CONTEXT_COMPUTE 1
 
 
 struct amdgpu_vm_pt {
 	struct amdgpu_bo	*bo;
 	uint64_t		addr;
-	bool			huge_page;
 
 	/* array of page tables, one for each directory entry */
 	struct amdgpu_vm_pt	*entries;
@@ -146,6 +142,9 @@ struct amdgpu_vm {
 
 	/* Flag to indicate if VM tables are updated by CPU or GPU (SDMA) */
 	bool                    use_cpu_for_update;
+
+	/* Whether this is a Compute or GFX Context */
+	int			vm_context;
 };
 
 struct amdgpu_vm_id {
@@ -207,6 +206,9 @@ struct amdgpu_vm_manager {
 	 * BIT1[= 0] Compute updated by SDMA [= 1] by CPU
 	 */
 	int					vm_update_mode;
+
+	/* Number of Compute VMs, used for detecting Compute activity */
+	unsigned                                n_compute_vms;
 };
 
 void amdgpu_vm_manager_init(struct amdgpu_device *adev);
